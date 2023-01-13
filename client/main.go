@@ -17,6 +17,9 @@ var (
 	wg          = sync.WaitGroup{}
 	doneChan    = make(chan bool)
 	srcAddr     string
+	sendData    bool
+	jitter      int
+	interval    int
 )
 
 func init() {
@@ -24,6 +27,9 @@ func init() {
 	flag.Int64Var(&conn_count, "conn", 50, "connection count")
 	flag.Int64Var(&batchSize, "batch", 5, "connection batch size")
 	flag.StringVar(&server_addr, "addr", "192.168.66.240:8000", "server addr")
+	flag.BoolVar(&sendData, "senddata", false, "whether to send data after first time communication")
+	flag.IntVar(&interval, "interval", 50, "interval between sending datas, in seconds")
+	flag.IntVar(&jitter, "jitter", 0, "jitter when sending data")
 	flag.Parse()
 }
 
@@ -78,5 +84,24 @@ func connect(wg *sync.WaitGroup, done chan bool, src *net.TCPAddr, dst string) {
 	defer conn.Close()
 	wg.Done()
 
-	select {}
+	for {
+		recvBuf := make([]byte, 1024)
+
+		_, err = conn.Write([]byte("PING\n"))
+		if err != nil {
+			fmt.Println("write error", err)
+		}
+
+		_, err = conn.Read(recvBuf[:])
+
+		if err != nil {
+			fmt.Println("read error", err)
+		}
+
+		if !sendData {
+			select {}
+		}
+
+		time.Sleep(time.Duration(interval+rand.Intn(jitter)) * time.Second)
+	}
 }

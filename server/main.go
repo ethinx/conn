@@ -15,10 +15,12 @@ import (
 var (
 	addr  string
 	count int64
+	echo  bool
 )
 
 func init() {
 	flag.StringVar(&addr, "addr", "0.0.0.0:9119", "listen addr")
+	flag.BoolVar(&echo, "echo", true, "is a echo server?")
 	flag.Parse()
 }
 
@@ -45,6 +47,30 @@ func main() {
 }
 
 func handleConn(conn net.Conn) {
+	var err error
+
 	defer conn.Close()
+
+	if echo {
+		for {
+			// _, err := r.ReadString('\n')
+			buf := make([]byte, 1024)
+			_, err = conn.Read(buf)
+			if err != nil {
+				fmt.Println("read error", err)
+			}
+			_, err = conn.Write([]byte("PONG\n"))
+			if err != nil {
+				fmt.Println("write error", err)
+			}
+		}
+	}
+
+	buf := make([]byte, 1024)
+	_, err = conn.Read(buf)
+	if err != nil {
+		fmt.Println("read error, and leave it idle", err)
+	}
+
 	select {}
 }
