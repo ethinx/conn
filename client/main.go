@@ -58,8 +58,8 @@ func connect(wg *sync.WaitGroup, done chan bool, src *net.TCPAddr, dst string) {
 
 	dailer := net.Dialer{
 		LocalAddr: src,
-		Timeout:   80 * time.Second,
-		KeepAlive: 90 * time.Second,
+		Timeout:   120 * time.Second,
+		KeepAlive: -1,
 	}
 	for {
 		conn, err = dailer.Dial("tcp", dst)
@@ -70,25 +70,13 @@ func connect(wg *sync.WaitGroup, done chan bool, src *net.TCPAddr, dst string) {
 		time.Sleep(time.Duration(200+rand.Intn(100)) * time.Millisecond)
 	}
 
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		tcp.SetKeepAlive(false)
+	}
+
 	// defer wg.Done()
 	defer conn.Close()
 	wg.Done()
 
-	for {
-		recvBuf := make([]byte, 1024)
-
-		_, err = conn.Write([]byte("PING\n"))
-		if err != nil {
-			fmt.Println("write error", err)
-		}
-
-		_, err = conn.Read(recvBuf[:])
-
-		if err != nil {
-			fmt.Println("read error", err)
-		}
-
-		_, err = conn.Read(recvBuf[:])
-		time.Sleep(time.Duration(1800+rand.Intn(1800)) * time.Second)
-	}
+	select {}
 }

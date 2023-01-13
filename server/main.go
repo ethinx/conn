@@ -2,10 +2,14 @@ package main
 
 import (
 	// "bufio"
+	"context"
 	"flag"
 	"fmt"
+	// "io"
+	// "math/rand"
 	"net"
 	"os"
+	// "time"
 )
 
 var (
@@ -20,7 +24,10 @@ func init() {
 
 func main() {
 	count = 0
-	ln, err := net.Listen("tcp", addr)
+	lc := net.ListenConfig{
+		KeepAlive: -1,
+	}
+	ln, err := lc.Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		panic(err)
 	}
@@ -38,19 +45,6 @@ func main() {
 }
 
 func handleConn(conn net.Conn) {
-	// r := bufio.NewReader(conn)
 	defer conn.Close()
-	for {
-		// _, err := r.ReadString('\n')
-		buf := make([]byte, 1024)
-		_, err := conn.Read(buf)
-		if err != nil {
-			fmt.Println("read error", err)
-		}
-		_, err = conn.Write([]byte("PONG\n"))
-		if err != nil {
-			fmt.Println("write error", err)
-			return
-		}
-	}
+	select {}
 }
