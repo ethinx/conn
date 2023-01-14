@@ -29,11 +29,15 @@ func init() {
 	flag.StringVar(&server_addr, "addr", "192.168.66.240:8000", "server addr")
 	flag.BoolVar(&sendData, "senddata", false, "whether to send data after first time communication")
 	flag.IntVar(&interval, "interval", 50, "interval between sending datas, in seconds")
-	flag.IntVar(&jitter, "jitter", 0, "jitter when sending data")
+	flag.IntVar(&jitter, "jitter", 1, "jitter when sending data")
 	flag.Parse()
 }
 
 func main() {
+
+	if jitter <= 0 {
+		jitter = 1
+	}
 
 	ip := net.ParseIP(srcAddr)
 
