@@ -66,11 +66,11 @@ func handleConn(conn net.Conn) {
 		}
 	}
 
-	buf := make([]byte, 1024)
-	_, err = conn.Read(buf)
-	if err != nil {
-		fmt.Println("read error, and leave it idle", err)
+	for {
+		buf := make([]byte, 1024)
+		_, err = conn.Read(buf)
+		if err != nil {
+			fmt.Println("read error", err)
+		}
 	}
-
-	select {}
 }
