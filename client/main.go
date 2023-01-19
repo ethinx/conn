@@ -1,12 +1,18 @@
 package main
 
 import (
+	// "errors"
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand"
 	"net"
 	"os"
+	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -14,21 +20,50 @@ import (
 )
 
 var (
-	server_addr string
-	conn_count  int64
-	batchSize   int64
-	wg          = sync.WaitGroup{}
-	doneChan    = make(chan bool)
-	srcAddr     string
-	sendData    bool
-	jitter      int
-	interval    int
-	payloadSize int
-	payload     []byte
-	logLevel    string
+	server_addr               string
+	conn_count                int64
+	batchSize                 int64
+	wg                        = sync.WaitGroup{}
+	doneChan                  = make(chan bool)
+	srcAddr                   string
+	sendData                  bool
+	jitter                    int
+	interval                  int
+	payloadSize               int
+	payload                   []byte
+	logLevel                  string
+	nic                       string
+	IPAddrs                   []net.Addr
+	estimatedTotalConnections int64
+	stateChan                 chan error
+	fireChan                  chan bool
 )
 
+type StateCounter struct {
+	CumulativeAttemptingConnections  int64
+	CumulativeEstablishedConnections int64
+	CurrentAttemptingConnections     int64
+	CurrentEstablishedConnections    int64
+	Attempted                        float64
+	Established                      float64
+	ConnTimeout                      int64
+	ReadTimeout                      int64
+	WriteTimeout                     int64
+	ErrorReset                       int64
+	ErrorAddrInUse                   int64
+}
+
+type Runner struct {
+	States      StateCounter
+	Dialer      net.Dialer
+	AddressPool []net.Addr
+	OutOfPort   bool
+}
+
 func init() {
+	rand.Seed(time.Now().UnixMilli())
+
+	flag.StringVar(&nic, "nic", "eth0", "the network interface")
 	flag.StringVar(&srcAddr, "src", "127.0.0.1", "source ip addr")
 	flag.Int64Var(&conn_count, "conn", 50, "connection count")
 	flag.Int64Var(&batchSize, "batch", 5, "connection batch size")
@@ -40,29 +75,61 @@ func init() {
 	flag.StringVar(&logLevel, "log-level", "info", "log level")
 	flag.Parse()
 
+	var err error
+
 	payload = make([]byte, payloadSize)
-	_, err := rand.Read(payload)
+	_, err = rand.Read(payload)
 	if err != nil {
 		fmt.Println("Error generating payload", err)
 		os.Exit(1)
 	}
 
-}
+	var inf *net.Interface
 
-func main() {
-	if jitter <= 0 {
-		jitter = 1
+	if inf, err = net.InterfaceByName(nic); err != nil {
+		panic(fmt.Sprintf("Unable to query interface: %s", nic))
 	}
 
-	ip := net.ParseIP(srcAddr)
+	addrs, err := inf.Addrs()
+	if err != nil {
+		panic(fmt.Sprintf("Unable to query addrs of interface: %s", nic))
+	}
 
+	IPAddrs = make([]net.Addr, 0)
+	for _, addr := range addrs {
+		if !strings.HasPrefix(addr.String(), "127.0") && !strings.Contains(addr.String(), ":") {
+			IPAddrs = append(IPAddrs, addr)
+		}
+	}
+
+	stateChan = make(chan error)
+	fireChan = make(chan bool)
+
+	localPortRange := GetLocalPortRange()
+	estimatedTotalConnections = int64(len(IPAddrs) * localPortRange)
+}
+
+func GetLocalPortRange() int {
+	cmd := exec.Command("sysctl", "-n", "net.ipv4.ip_local_port_range")
+	out, _ := cmd.CombinedOutput()
+	r := strings.Fields(string(out))
+	start, _ := strconv.Atoi(r[0])
+	end, _ := strconv.Atoi(r[1])
+	return end - start
+}
+
+func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
+	var conn net.Conn
+	var err error
+
+	addr := r.AddressPool[rand.Intn(len(r.AddressPool))]
 	src := &net.TCPAddr{
-		IP: ip,
+		IP: net.ParseIP(strings.Split(addr.String(), "/")[0]),
 	}
 
 	dialer := net.Dialer{
 		LocalAddr: src,
-		Timeout:   120 * time.Second,
+		// Timeout:   120 * time.Second,
 		KeepAlive: -1,
 		DualStack: true,
 		Control: func(network, address string, c syscall.RawConn) error {
@@ -80,56 +147,58 @@ func main() {
 		},
 	}
 
-	start := time.Now()
-	for i := int64(0); i < conn_count; {
-		for j := int64(0); j < batchSize; j++ {
-			wg.Add(1)
-			go connect(&wg, dialer, src, server_addr)
-			i++
-		}
-		if conn_count-i < batchSize {
-			batchSize = conn_count - i
-		}
-		fmt.Println("Wait", i)
-		wg.Wait()
-	}
-	fmt.Println("All set", time.Since(start))
-	select {}
-}
+	atomic.AddInt64(&r.States.CurrentAttemptingConnections, 1)
+	atomic.AddInt64(&r.States.CumulativeAttemptingConnections, 1)
+	conn, err = dialer.Dial(proto, dst)
 
-func connect(wg *sync.WaitGroup, dialer net.Dialer, src *net.TCPAddr, dst string) {
-	var conn net.Conn
-	var err error
-
-	for {
-		conn, err = dialer.Dial("tcp", dst)
-		if err == nil {
-			break
+	if err != nil {
+		atomic.AddInt64(&r.States.CurrentAttemptingConnections, -1)
+		if err == os.ErrDeadlineExceeded {
+			atomic.AddInt64(&r.States.ConnTimeout, 1)
 		}
-		fmt.Println("dail error:", err)
-		time.Sleep(time.Duration(200+rand.Intn(100)) * time.Millisecond)
+		stateChan <- err
+		return
 	}
+
+	defer func() {
+		conn.Close()
+	}()
 
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		tcp.SetKeepAlive(false)
 	}
 
-	// defer wg.Done()
-	defer conn.Close()
-	wg.Done()
+	countConnected := false
 
 	for {
 		recvBuf := make([]byte, 1024)
 
+		conn.SetDeadline(time.Now().Add(30 * time.Second))
 		_, err = conn.Write(payload)
 		if err != nil {
-			fmt.Println("write error", err)
+			if err == os.ErrDeadlineExceeded {
+				atomic.AddInt64(&r.States.WriteTimeout, 1)
+			}
+			stateChan <- err
+			return
 		}
 
+		conn.SetDeadline(time.Now().Add(30 * time.Second))
 		_, err = conn.Read(recvBuf[:])
+		if !countConnected {
+			atomic.AddInt64(&r.States.CumulativeEstablishedConnections, 1)
+			atomic.AddInt64(&r.States.CurrentEstablishedConnections, 1)
+			atomic.AddInt64(&r.States.CurrentAttemptingConnections, -1)
+			countConnected = true
+		}
 
 		if err != nil {
-			fmt.Println("read error", err)
+			if err == os.ErrDeadlineExceeded {
+				atomic.AddInt64(&r.States.ReadTimeout, 1)
+			}
+			atomic.AddInt64(&r.States.CurrentEstablishedConnections, -1)
+			stateChan <- err
+			return
 		}
 
 		if !sendData {
@@ -138,4 +207,97 @@ func connect(wg *sync.WaitGroup, dialer net.Dialer, src *net.TCPAddr, dst string
 
 		time.Sleep(time.Duration(interval+rand.Intn(jitter)) * time.Second)
 	}
+}
+
+func (r *Runner) fireConnection(firechan chan bool) {
+	for {
+		if r.States.CurrentAttemptingConnections+r.States.CurrentEstablishedConnections <= estimatedTotalConnections-500 {
+			firechan <- true
+			r.OutOfPort = false
+			continue
+		}
+		fmt.Println("LocalPort used up")
+		firechan <- false
+		r.OutOfPort = true
+		time.Sleep(30 * time.Second)
+	}
+}
+
+func (r *Runner) HandleErrors(stateChan chan error) {
+	for {
+		select {
+		case err := <-stateChan:
+			ne, ok := err.(*net.OpError)
+			if ok {
+				switch {
+				case errors.Is(ne, syscall.ECONNRESET):
+					atomic.AddInt64(&r.States.ErrorReset, 1)
+				case errors.Is(ne, syscall.EADDRINUSE):
+					atomic.AddInt64(&r.States.ErrorAddrInUse, 1)
+				case errors.Is(ne, syscall.EADDRNOTAVAIL):
+					atomic.AddInt64(&r.States.ErrorAddrInUse, 1)
+				case ne.Timeout():
+					if ne.Op == "read" {
+						atomic.AddInt64(&r.States.ReadTimeout, 1)
+					} else if ne.Op == "write" {
+						atomic.AddInt64(&r.States.WriteTimeout, 1)
+					} else {
+						fmt.Println("Timeout", ne.Unwrap())
+						panic(err)
+					}
+				default:
+					fmt.Println("Unwrap", ne.Unwrap())
+					panic(err)
+				}
+			} else {
+				panic(err)
+			}
+		}
+	}
+}
+
+func (r *Runner) ReportStates() {
+	fmt.Println("================", time.Now())
+	fmt.Printf("estimatedTotalConnections: %d\n", estimatedTotalConnections)
+	fmt.Printf("CumulativeAttemptingConnections: %d\n", r.States.CumulativeAttemptingConnections)
+	fmt.Printf("CumulativeEstablishedConnections: %d\n", r.States.CumulativeEstablishedConnections)
+	fmt.Printf("CurrentAttemptingConnections: %d\n", r.States.CurrentAttemptingConnections)
+	fmt.Printf("CurrentEstablishedConnections: %d\n", r.States.CurrentEstablishedConnections)
+	fmt.Printf("ConnTimeout: %d\n", r.States.ConnTimeout)
+	fmt.Printf("WriteTimeout: %d\n", r.States.WriteTimeout)
+	fmt.Printf("ReadTimeout: %d\n", r.States.ReadTimeout)
+	fmt.Printf("ErrorReset: %d\n", r.States.ErrorReset)
+	fmt.Printf("ErrorAddrInUse: %d\n", r.States.ErrorAddrInUse)
+
+}
+
+func main() {
+	if jitter <= 0 {
+		jitter = 1
+	}
+
+	// Start Runner and count
+	runner := Runner{
+		OutOfPort:   false,
+		States:      StateCounter{},
+		AddressPool: IPAddrs,
+	}
+
+	// start := time.Now()
+	ticker := time.NewTicker(time.Second)
+
+	go runner.fireConnection(fireChan)
+	go runner.HandleErrors(stateChan)
+
+	for {
+		select {
+		case fire := <-fireChan:
+			if fire {
+				go runner.Connect("tcp", server_addr, stateChan)
+			}
+		case <-ticker.C:
+			runner.ReportStates()
+		}
+	}
+
 }

@@ -58,10 +58,12 @@ func handleConn(conn net.Conn) {
 			_, err = conn.Read(buf)
 			if err != nil {
 				fmt.Println("read error", err)
+				return
 			}
 			_, err = conn.Write([]byte("PONG\n"))
 			if err != nil {
 				fmt.Println("write error", err)
+				return
 			}
 		}
 	}
@@ -71,6 +73,7 @@ func handleConn(conn net.Conn) {
 		_, err = conn.Read(buf)
 		if err != nil {
 			fmt.Println("read error", err)
+			return
 		}
 	}
 }
