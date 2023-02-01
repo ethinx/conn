@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"math/rand"
 	"net"
 	"os"
@@ -17,6 +18,9 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 var (
@@ -49,18 +53,28 @@ type StateCounter struct {
 	ConnTimeout                      int64
 	ReadTimeout                      int64
 	WriteTimeout                     int64
+	DialTimeout                      int64
 	ErrorReset                       int64
 	ErrorAddrInUse                   int64
+	ErrorOthers1                     int64
+	ErrorOthers2                     int64
+	ErrorOthers3                     int64
 }
 
 type Runner struct {
+	IPIndex     int64
 	States      StateCounter
+	Records     []StateCounter
+	curr        int
 	Dialer      net.Dialer
 	AddressPool []net.Addr
 	OutOfPort   bool
 }
 
 func init() {
+	go func() {
+		log.Fatalln(http.ListenAndServe("0.0.0.0:16060", nil))
+	}()
 	rand.Seed(time.Now().UnixMilli())
 
 	flag.StringVar(&nic, "nic", "eth0", "the network interface")
@@ -106,7 +120,8 @@ func init() {
 	fireChan = make(chan bool)
 
 	localPortRange := GetLocalPortRange()
-	estimatedTotalConnections = int64(len(IPAddrs) * localPortRange)
+	// exclude the default ip addrs of the NIC
+	estimatedTotalConnections = int64((len(IPAddrs) - 1) * localPortRange)
 }
 
 func GetLocalPortRange() int {
@@ -122,6 +137,8 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 	var conn net.Conn
 	var err error
 
+	// atomic.AddInt64(&r.IPIndex, 1)
+	// addr := r.AddressPool[r.IPIndex%int64(len(r.AddressPool))]
 	addr := r.AddressPool[rand.Intn(len(r.AddressPool))]
 	src := &net.TCPAddr{
 		IP: net.ParseIP(strings.Split(addr.String(), "/")[0]),
@@ -179,6 +196,7 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 			if err == os.ErrDeadlineExceeded {
 				atomic.AddInt64(&r.States.WriteTimeout, 1)
 			}
+			atomic.AddInt64(&r.States.CurrentEstablishedConnections, -1)
 			stateChan <- err
 			return
 		}
@@ -211,7 +229,7 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 
 func (r *Runner) fireConnection(firechan chan bool) {
 	for {
-		if r.States.CurrentAttemptingConnections+r.States.CurrentEstablishedConnections <= estimatedTotalConnections-500 {
+		if r.States.CurrentAttemptingConnections+r.States.CurrentEstablishedConnections < estimatedTotalConnections-500 {
 			firechan <- true
 			r.OutOfPort = false
 			continue
@@ -241,33 +259,47 @@ func (r *Runner) HandleErrors(stateChan chan error) {
 						atomic.AddInt64(&r.States.ReadTimeout, 1)
 					} else if ne.Op == "write" {
 						atomic.AddInt64(&r.States.WriteTimeout, 1)
+					} else if ne.Op == "dial" {
+						atomic.AddInt64(&r.States.DialTimeout, 1)
 					} else {
-						fmt.Println("Timeout", ne.Unwrap())
-						panic(err)
+						atomic.AddInt64(&r.States.ErrorOthers1, 1)
 					}
 				default:
-					fmt.Println("Unwrap", ne.Unwrap())
-					panic(err)
+					atomic.AddInt64(&r.States.ErrorOthers2, 1)
 				}
 			} else {
-				panic(err)
+				atomic.AddInt64(&r.States.ErrorOthers3, 1)
 			}
+
 		}
 	}
 }
 
 func (r *Runner) ReportStates() {
-	fmt.Println("================", time.Now())
+	prev := r.Records[r.curr]
+	now := r.States
+	r.curr ^= r.curr
+	r.Records[r.curr] = now
+
+	// estabPerItv := r.Records[r.curr].CurrentEstablishedConnections - prev.CurrentEstablishedConnections
+	estabPerItv := now.CurrentEstablishedConnections - prev.CurrentEstablishedConnections
+
+	fmt.Println("================", time.Now(), r.OutOfPort)
 	fmt.Printf("estimatedTotalConnections: %d\n", estimatedTotalConnections)
 	fmt.Printf("CumulativeAttemptingConnections: %d\n", r.States.CumulativeAttemptingConnections)
 	fmt.Printf("CumulativeEstablishedConnections: %d\n", r.States.CumulativeEstablishedConnections)
 	fmt.Printf("CurrentAttemptingConnections: %d\n", r.States.CurrentAttemptingConnections)
 	fmt.Printf("CurrentEstablishedConnections: %d\n", r.States.CurrentEstablishedConnections)
+	fmt.Printf("EstablishedPerSecond: %d\n", estabPerItv)
 	fmt.Printf("ConnTimeout: %d\n", r.States.ConnTimeout)
 	fmt.Printf("WriteTimeout: %d\n", r.States.WriteTimeout)
+	fmt.Printf("DialTimeout: %d\n", r.States.DialTimeout)
 	fmt.Printf("ReadTimeout: %d\n", r.States.ReadTimeout)
 	fmt.Printf("ErrorReset: %d\n", r.States.ErrorReset)
 	fmt.Printf("ErrorAddrInUse: %d\n", r.States.ErrorAddrInUse)
+	fmt.Printf("ErrorAddrOthers1: %d\n", r.States.ErrorOthers1)
+	fmt.Printf("ErrorAddrOthers2: %d\n", r.States.ErrorOthers2)
+	fmt.Printf("ErrorAddrOthers3: %d\n", r.States.ErrorOthers3)
 
 }
 
@@ -280,10 +312,10 @@ func main() {
 	runner := Runner{
 		OutOfPort:   false,
 		States:      StateCounter{},
+		Records:     make([]StateCounter, 2),
 		AddressPool: IPAddrs,
 	}
 
-	// start := time.Now()
 	ticker := time.NewTicker(time.Second)
 
 	go runner.fireConnection(fireChan)
