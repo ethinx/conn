@@ -90,7 +90,7 @@ func init() {
 	flag.IntVar(&payloadSize, "payload-size", 73, "random payload size")
 	flag.StringVar(&logLevel, "log-level", "info", "log level")
 	flag.BoolVar(&pprof, "pprof", false, "enable pprof")
-	flag.IntVar(&timeout, "timeout", 50, "readwrite timeout seconds")
+	flag.IntVar(&timeout, "timeout", 30, "readwrite timeout seconds")
 	flag.BoolVar(&setBindNoPort, "set-bind-no-port", true, "set IP_BIND_ADDRESS_NO_PORT")
 	flag.Parse()
 
