@@ -69,6 +69,7 @@ type Runner struct {
 	Dialer      net.Dialer
 	AddressPool []net.Addr
 	OutOfPort   bool
+	BatchSize   int64
 }
 
 func init() {
@@ -228,16 +229,32 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 }
 
 func (r *Runner) fireConnection(firechan chan bool) {
+	tick := time.Tick(time.Second)
+
 	for {
-		if r.States.CurrentAttemptingConnections+r.States.CurrentEstablishedConnections < estimatedTotalConnections-500 {
-			firechan <- true
-			r.OutOfPort = false
-			continue
+		select {
+		case _ = <-tick:
+			var batch int64
+			totalConn := estimatedTotalConnections - 500
+			currentConn := r.States.CurrentAttemptingConnections + r.States.CurrentEstablishedConnections
+			remaing := totalConn - currentConn
+
+			if remaing >= r.BatchSize {
+				batch = r.BatchSize
+			} else {
+				batch = remaing
+			}
+
+			if currentConn < totalConn {
+				for i := int64(0); i <= batch; i++ {
+					go r.Connect("tcp", server_addr, stateChan)
+				}
+				r.OutOfPort = false
+			} else {
+				r.OutOfPort = true
+				continue
+			}
 		}
-		fmt.Println("LocalPort used up")
-		firechan <- false
-		r.OutOfPort = true
-		time.Sleep(30 * time.Second)
 	}
 }
 
@@ -314,6 +331,7 @@ func main() {
 		States:      StateCounter{},
 		Records:     make([]StateCounter, 2),
 		AddressPool: IPAddrs,
+		BatchSize:   batchSize,
 	}
 
 	ticker := time.NewTicker(time.Second)
@@ -323,10 +341,10 @@ func main() {
 
 	for {
 		select {
-		case fire := <-fireChan:
-			if fire {
-				go runner.Connect("tcp", server_addr, stateChan)
-			}
+		// case fire := <-fireChan:
+		// 	if fire {
+		// 		go runner.Connect("tcp", server_addr, stateChan)
+		// 	}
 		case <-ticker.C:
 			runner.ReportStates()
 		}
