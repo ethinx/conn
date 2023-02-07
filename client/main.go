@@ -184,6 +184,7 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		tcp.SetKeepAlive(false)
+		tcp.SetLinger(0)
 	}
 
 	countConnected := false
