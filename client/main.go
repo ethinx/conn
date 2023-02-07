@@ -41,6 +41,8 @@ var (
 	estimatedTotalConnections int64
 	stateChan                 chan error
 	fireChan                  chan bool
+	pprof                     bool
+	timeout                   int
 )
 
 type StateCounter struct {
@@ -73,9 +75,6 @@ type Runner struct {
 }
 
 func init() {
-	go func() {
-		log.Fatalln(http.ListenAndServe("0.0.0.0:16060", nil))
-	}()
 	rand.Seed(time.Now().UnixMilli())
 
 	flag.StringVar(&nic, "nic", "eth0", "the network interface")
@@ -88,7 +87,15 @@ func init() {
 	flag.IntVar(&jitter, "jitter", 1, "jitter when sending data")
 	flag.IntVar(&payloadSize, "payload-size", 73, "random payload size")
 	flag.StringVar(&logLevel, "log-level", "info", "log level")
+	flag.BoolVar(&pprof, "pprof", false, "enable pprof")
+	flag.IntVar(&timeout, "timeout", 30, "readwrite timeout seconds")
 	flag.Parse()
+
+	if pprof {
+		go func() {
+			log.Fatalln(http.ListenAndServe("0.0.0.0:16060", nil))
+		}()
+	}
 
 	var err error
 
@@ -122,7 +129,11 @@ func init() {
 
 	localPortRange := GetLocalPortRange()
 	// exclude the default ip addrs of the NIC
-	estimatedTotalConnections = int64((len(IPAddrs) - 1) * localPortRange)
+	if len(IPAddrs) > 1 {
+		estimatedTotalConnections = int64((len(IPAddrs) - 1) * localPortRange)
+	} else {
+		estimatedTotalConnections = int64(localPortRange)
+	}
 }
 
 func GetLocalPortRange() int {
@@ -192,7 +203,7 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 	for {
 		recvBuf := make([]byte, 1024)
 
-		conn.SetDeadline(time.Now().Add(30 * time.Second))
+		conn.SetDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
 		_, err = conn.Write(payload)
 		if err != nil {
 			if err == os.ErrDeadlineExceeded {
@@ -203,7 +214,7 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 			return
 		}
 
-		conn.SetDeadline(time.Now().Add(30 * time.Second))
+		conn.SetDeadline(time.Now().Add(time.Duration(timeout) * time.Second))
 		_, err = conn.Read(recvBuf[:])
 		if !countConnected {
 			atomic.AddInt64(&r.States.CumulativeEstablishedConnections, 1)
