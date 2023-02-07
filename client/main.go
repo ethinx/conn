@@ -43,6 +43,7 @@ var (
 	fireChan                  chan bool
 	pprof                     bool
 	timeout                   int
+	setBindNoPort             bool
 )
 
 type StateCounter struct {
@@ -58,6 +59,7 @@ type StateCounter struct {
 	DialTimeout                      int64
 	ErrorReset                       int64
 	ErrorAddrInUse                   int64
+	ErrorAddrNotAvail                int64
 	ErrorOthers1                     int64
 	ErrorOthers2                     int64
 	ErrorOthers3                     int64
@@ -88,7 +90,8 @@ func init() {
 	flag.IntVar(&payloadSize, "payload-size", 73, "random payload size")
 	flag.StringVar(&logLevel, "log-level", "info", "log level")
 	flag.BoolVar(&pprof, "pprof", false, "enable pprof")
-	flag.IntVar(&timeout, "timeout", 30, "readwrite timeout seconds")
+	flag.IntVar(&timeout, "timeout", 50, "readwrite timeout seconds")
+	flag.BoolVar(&setBindNoPort, "set-bind-no-port", true, "set IP_BIND_ADDRESS_NO_PORT")
 	flag.Parse()
 
 	if pprof {
@@ -170,7 +173,9 @@ func (r *Runner) Connect(proto string, dst string, stateChan chan error) {
 
 				// https://blog.cloudflare.com/how-to-stop-running-out-of-ephemeral-ports-and-start-to-love-long-lived-connections/
 				// https://kernelnewbies.org/Linux_4.2#Networking
-				unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BIND_ADDRESS_NO_PORT, 1)
+				if setBindNoPort {
+					unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_BIND_ADDRESS_NO_PORT, 1)
+				}
 			})
 			return e
 		},
@@ -282,7 +287,7 @@ func (r *Runner) HandleErrors(stateChan chan error) {
 				case errors.Is(ne, syscall.EADDRINUSE):
 					atomic.AddInt64(&r.States.ErrorAddrInUse, 1)
 				case errors.Is(ne, syscall.EADDRNOTAVAIL):
-					atomic.AddInt64(&r.States.ErrorAddrInUse, 1)
+					atomic.AddInt64(&r.States.ErrorAddrNotAvail, 1)
 				case ne.Timeout():
 					if ne.Op == "read" {
 						atomic.AddInt64(&r.States.ReadTimeout, 1)
@@ -326,6 +331,7 @@ func (r *Runner) ReportStates() {
 	fmt.Printf("ReadTimeout: %d\n", r.States.ReadTimeout)
 	fmt.Printf("ErrorReset: %d\n", r.States.ErrorReset)
 	fmt.Printf("ErrorAddrInUse: %d\n", r.States.ErrorAddrInUse)
+	fmt.Printf("ErrorAddrNotAvail: %d\n", r.States.ErrorAddrNotAvail)
 	fmt.Printf("ErrorAddrOthers1: %d\n", r.States.ErrorOthers1)
 	fmt.Printf("ErrorAddrOthers2: %d\n", r.States.ErrorOthers2)
 	fmt.Printf("ErrorAddrOthers3: %d\n", r.States.ErrorOthers3)
