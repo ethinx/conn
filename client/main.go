@@ -1,5 +1,14 @@
 package main
 
+// TODO:
+/*
+   * Detect kernel version
+   * If it's larger than 4, the maximum conn will be half of local_port_range
+       * slower connection creation when connection count larger than local_port_range/2?
+   * be able to set interval between loop
+   * be able to calculate connect() duration
+*/
+
 import (
 	// "errors"
 	"errors"
@@ -44,6 +53,9 @@ var (
 	pprof                     bool
 	timeout                   int
 	setBindNoPort             bool
+	maxConn                   int64
+	halfConn                  bool
+	isNewKernel               bool
 )
 
 type StateCounter struct {
@@ -83,6 +95,7 @@ func init() {
 	flag.StringVar(&srcAddr, "src", "127.0.0.1", "source ip addr")
 	flag.Int64Var(&conn_count, "conn", 50, "connection count")
 	flag.Int64Var(&batchSize, "batch", 5, "connection batch size")
+	flag.Int64Var(&maxConn, "max-conn", 0, "maximum connections")
 	flag.StringVar(&server_addr, "addr", "192.168.66.240:8000", "server addr")
 	flag.BoolVar(&sendData, "senddata", false, "whether to send data after first time communication")
 	flag.IntVar(&interval, "interval", 50, "interval between sending datas, in seconds")
@@ -92,6 +105,7 @@ func init() {
 	flag.BoolVar(&pprof, "pprof", false, "enable pprof")
 	flag.IntVar(&timeout, "timeout", 30, "readwrite timeout seconds")
 	flag.BoolVar(&setBindNoPort, "set-bind-no-port", true, "set IP_BIND_ADDRESS_NO_PORT")
+	flag.BoolVar(&halfConn, "half-conn", true, "half connection if kernel version greater than 4")
 	flag.Parse()
 
 	if pprof {
@@ -99,6 +113,12 @@ func init() {
 			log.Fatalln(http.ListenAndServe("0.0.0.0:16060", nil))
 		}()
 	}
+
+	if maxConn > 0 && maxConn <= 500 {
+		panic("max connection should greater than 500")
+	}
+
+	isNewKernel = KernelLargeThan4()
 
 	var err error
 
@@ -137,6 +157,13 @@ func init() {
 	} else {
 		estimatedTotalConnections = int64(localPortRange)
 	}
+}
+
+func KernelLargeThan4() bool {
+	cmd := exec.Command("uname", "-r")
+	out, _ := cmd.CombinedOutput()
+	prefix, _ := strconv.Atoi(string(out[0]))
+	return prefix >= 4
 }
 
 func GetLocalPortRange() int {
@@ -252,14 +279,27 @@ func (r *Runner) fireConnection(firechan chan bool) {
 		select {
 		case _ = <-tick:
 			var batch int64
-			totalConn := estimatedTotalConnections - 500
+			var totalConn int64
+
+			if maxConn > 0 {
+				totalConn = maxConn
+			} else {
+				totalConn = estimatedTotalConnections - 500
+			}
 			currentConn := r.States.CurrentAttemptingConnections + r.States.CurrentEstablishedConnections
+			if isNewKernel && halfConn {
+				totalConn = totalConn / 2
+			}
 			remaing := totalConn - currentConn
 
 			if remaing >= r.BatchSize {
 				batch = r.BatchSize
 			} else {
 				batch = remaing
+			}
+
+			if isNewKernel && !halfConn && (currentConn > totalConn/2) && (maxConn == 0 || maxConn >= totalConn/2) {
+				batch = batch / 2
 			}
 
 			if currentConn < totalConn {
@@ -354,18 +394,21 @@ func main() {
 
 	ticker := time.NewTicker(time.Second)
 
-	go runner.fireConnection(fireChan)
-	go runner.HandleErrors(stateChan)
+	go func() {
 
-	for {
-		select {
-		// case fire := <-fireChan:
-		// 	if fire {
-		// 		go runner.Connect("tcp", server_addr, stateChan)
-		// 	}
-		case <-ticker.C:
-			runner.ReportStates()
+		for {
+			select {
+			// case fire := <-fireChan:
+			// 	if fire {
+			// 		go runner.Connect("tcp", server_addr, stateChan)
+			// 	}
+			case <-ticker.C:
+				runner.ReportStates()
+			}
 		}
-	}
+	}()
+	go runner.HandleErrors(stateChan)
+	go runner.fireConnection(fireChan)
 
+	select {}
 }
